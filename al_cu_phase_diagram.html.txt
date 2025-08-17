@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Al–Cu Phase Diagram (0–8 wt% Cu) — Region Quiz</title>
+<style>
+  :root{
+    --bg:#0b0c10; --panel:#ffffff; --ink:#111;
+    --cAlpha:#a7f3d0;      /* α */
+    --cMushy:#fde68a;      /* α + L */
+    --cLiquid:#e5f0ff;     /* Liquid tint */
+    --cAlphaTheta:#86efac; /* α + θ */
+    --accent:#e11d48;
+  }
+  html,body{height:100%;margin:0;background:var(--bg);color:#111;
+    font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  .wrap{max-width:1100px;margin:auto;padding:18px}
+  .card{background:var(--panel);border-radius:16px;box-shadow:0 10px 24px rgba(0,0,0,.25);padding:16px}
+  h1{font-size:20px;margin:0 0 8px}
+  .pills{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+  .pill{border-radius:999px;padding:8px 12px;background:#ecfeff;border:1px solid #cffafe;font-size:13px}
+  .topbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px}
+  button{border:1px solid #e5e7eb;background:#111;color:#fff;border-radius:12px;padding:8px 12px;font-weight:600;cursor:pointer}
+  button.secondary{background:#fff;color:#111}
+  button:disabled{opacity:.6;cursor:not-allowed}
+  .status{font-size:13px;color:#111;background:#f1f5f9;border:1px solid #e2e8f0;padding:6px 10px;border-radius:10px}
+  canvas{width:100%;height:640px;background:#fff;border-radius:14px;border:1px solid #e5e7eb}
+  .foot{color:#6b7280;font-size:12px;margin-top:6px}
+  .hoverbox{
+    position:fixed; pointer-events:none; transform:translate(10px,10px);
+    background:#111; color:#fff; padding:6px 8px; border-radius:8px;
+    font-size:12px; display:none; white-space:nowrap; z-index:5;
+  }
+  .flash{
+    position:absolute; width:20px; height:20px; border-radius:50%;
+    transform:translate(-10px,-10px); z-index:6; pointer-events:none; display:none;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>Al–Cu Phase Diagram (0–8 wt% Cu)</h1>
+
+    <div class="pills">
+      <div class="pill">Pure Al melts ≈ <b>660 °C</b></div>
+      <div class="pill">Max α solubility ≈ <b>5.65 wt% Cu @ 548–550 °C</b></div>
+      <div class="pill">Hover to see phase • Use <b>Start Quiz</b> to practice</div>
+    </div>
+
+    <div class="topbar">
+      <button id="start">Start Quiz</button>
+      <button id="next" class="secondary" disabled>Next</button>
+      <button id="reset" class="secondary">Reset</button>
+      <span class="status" id="qinfo">Quiz off</span>
+      <span class="status" id="score">Score: 0 / 0</span>
+    </div>
+
+    <div style="position:relative">
+      <canvas id="ph" width="980" height="640" aria-label="Phase diagram canvas"></canvas>
+      <div id="flash" class="flash"></div>
+    </div>
+
+    <div class="foot">
+      Axes: x = composition (wt% Cu), y = temperature (°C). Dashed red line marks the 5.65 wt% solubility point (~549 °C).
+    </div>
+  </div>
+</div>
+
+<div id="hover" class="hoverbox"></div>
+
+<script>
+// ===== Domain & helpers =====
+const MAX_CU = 8.0;
+const T_MIN = 20, T_MAX = 700;
+const CAN_W = 980, CAN_H = 640;
+
+const canvas = document.getElementById('ph');
+const ctx = canvas.getContext('2d');
+const tip = document.getElementById('hover');
+
+function xPix(C){ return 70 + (CAN_W-110)*(C/MAX_CU); }
+function yPix(T){ return CAN_H-60 - (CAN_H-110)*((T-T_MIN)/(T_MAX-T_MIN)); }
+function fromPix(x,y){
+  const C = Math.max(0, Math.min(MAX_CU, ( (x-70)/(CAN_W-110) )*MAX_CU ));
+  const T = Math.max(T_MIN, Math.min(T_MAX, T_MIN + ( (CAN_H-60 - y)/(CAN_H-110) )*(T_MAX-T_MIN) ));
+  return {C,T};
+}
+
+// ===== Teaching-accurate curves (0–8 wt% Cu) =====
+function T_liquidus(C){ return 660 - 3.0*C; } // gentle decrease 0→8%
+function T_solidus(C){
+  if(C <= 5.65){
+    const T0 = 640; // near pure Al solidus
+    return T0 - (T0-550)*(C/5.65);
+  } else { return 550; }
+}
+const k = 0.01079; // solvus fit; Cmax(548°C)≈5.65%, Cmax(25°C)≈~0.02%
+function Cmax_in_alpha(T){
+  if(T >= 550) return 5.65;
+  return Math.max(0, 5.65 * Math.exp(-k*(548 - T)));
+}
+
+// Phase detector
+function getPhase(C,T){
+  const tL = T_liquidus(C);
+  const tS = T_solidus(C);
+  if(T >= tL) return {name:"Liquid"};
+  if(T > tS)  return {name:"α Al + Liquid"};
+  const Cmax = Cmax_in_alpha(T);
+  if(C <= Cmax) return {name:"α Al (solid solution)"};
+  return {name:"α Al + CuAl₂ (θ)"};
+}
+
+// ===== Drawing =====
+let showLabels = true; // hidden during quiz
+
+function drawAxes(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle="#ffffff"; ctx.fillRect(0,0,canvas.width,canvas.height);
+
+  ctx.strokeStyle="#111"; ctx.lineWidth=1.2;
+  // y-axis
+  ctx.beginPath(); ctx.moveTo(70, yPix(T_MIN)); ctx.lineTo(70, yPix(T_MAX)+10); ctx.stroke();
+  // x-axis
+  ctx.beginPath(); ctx.moveTo(60, yPix(T_MIN)); ctx.lineTo(xPix(MAX_CU)+10, yPix(T_MIN)); ctx.stroke();
+
+  ctx.fillStyle="#111"; ctx.font="12px system-ui, sans-serif";
+  for(let T=100; T<=700; T+=100){
+    const yp=yPix(T);
+    ctx.beginPath(); ctx.moveTo(65,yp); ctx.lineTo(70,yp); ctx.stroke();
+    ctx.fillText(`${T}`, 32, yp+4);
+  }
+  ctx.save(); ctx.translate(20, yPix(360)); ctx.rotate(-Math.PI/2);
+  ctx.fillText("Temperature (°C)", 0, 0); ctx.restore();
+
+  for(let c=0; c<=8; c+=1){
+    const xp=xPix(c);
+    ctx.beginPath(); ctx.moveTo(xp, yPix(T_MIN)); ctx.lineTo(xp, yPix(T_MIN)+6); ctx.stroke();
+    ctx.fillText(`${c}`, xp-3, yPix(T_MIN)+18);
+  }
+  ctx.fillText("Composition (wt% Cu)", xPix(3.6), yPix(T_MIN)+36);
+}
+
+function fillRegions(){
+  // α + θ
+  ctx.save(); ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue('--cAlphaTheta').trim();
+  ctx.beginPath();
+  ctx.moveTo(xPix(0), yPix(T_MIN));
+  ctx.lineTo(xPix(0), yPix(550));
+  for(let T=550; T>=T_MIN; T-=2){
+    const C = Math.min(Cmax_in_alpha(T), MAX_CU);
+    ctx.lineTo(xPix(C), yPix(T));
+  }
+  ctx.lineTo(xPix(MAX_CU), yPix(T_MIN));
+  ctx.closePath(); ctx.fill(); ctx.restore();
+
+  // α
+  ctx.save(); ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue('--cAlpha').trim();
+  ctx.beginPath();
+  ctx.moveTo(xPix(0), yPix(T_solidus(0)));
+  for(let C=0; C<=MAX_CU; C+=0.05) ctx.lineTo(xPix(C), yPix(T_solidus(C)));
+  for(let T=550; T>=T_MIN; T-=2){
+    const C = Math.min(Cmax_in_alpha(T), MAX_CU);
+    ctx.lineTo(xPix(C), yPix(T));
+  }
+  ctx.closePath(); ctx.fill(); ctx.restore();
+
+  // α + Liquid
+  ctx.save(); ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue('--cMushy').trim();
+  ctx.beginPath();
+  ctx.moveTo(xPix(0), yPix(T_solidus(0)));
+  for(let C=0; C<=MAX_CU; C+=0.05) ctx.lineTo(xPix(C), yPix(T_solidus(C)));
+  for(let C=MAX_CU; C>=0; C-=0.05) ctx.lineTo(xPix(C), yPix(T_liquidus(C)));
+  ctx.closePath(); ctx.fill(); ctx.restore();
+
+  // Liquid
+  ctx.save(); ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue('--cLiquid').trim();
+  ctx.beginPath();
+  ctx.moveTo(xPix(0), yPix(T_liquidus(0)));
+  for(let C=0; C<=MAX_CU; C+=0.05) ctx.lineTo(xPix(C), yPix(T_liquidus(C)));
+  ctx.lineTo(xPix(MAX_CU), yPix(T_MAX));
+  ctx.lineTo(xPix(0), yPix(T_MAX));
+  ctx.closePath(); ctx.fill(); ctx.restore();
+}
+
+function guides(){
+  // 660 °C line
+  ctx.strokeStyle="#94a3b8"; ctx.setLineDash([4,4]); ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(xPix(0), yPix(660)); ctx.lineTo(xPix(MAX_CU), yPix(660)); ctx.stroke();
+
+  // 5.65% vertical
+  ctx.strokeStyle="#ef4444"; ctx.setLineDash([6,6]);
+  ctx.beginPath(); ctx.moveTo(xPix(5.65), yPix(T_MIN)); ctx.lineTo(xPix(5.65), yPix(T_MAX)); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Labels near guides
+  ctx.fillStyle="#111"; ctx.font="12px system-ui, sans-serif"; ctx.textAlign="left";
+  ctx.fillText("≈660 °C (pure Al melting)", xPix(4.1), yPix(660)-6);
+
+  // Dot at max solubility
+  ctx.fillStyle="#ef4444";
+  ctx.beginPath(); ctx.arc(xPix(5.65), yPix(549), 4, 0, 2*Math.PI); ctx.fill();
+  ctx.fillStyle="#111"; ctx.textAlign="center";
+  ctx.fillText("max α solubility ≈5.65% @ ~549 °C", xPix(4.9), yPix(560)+14);
+}
+
+function regionLabels(){
+  if(!showLabels) return; // hide during quiz
+  ctx.fillStyle="#0f172a";
+  ctx.font="600 14px system-ui, sans-serif";
+  ctx.textAlign="center";
+  ctx.fillText("α Al (Solid Solution)", xPix(2.0), yPix(520));
+  const Cm = 4.5, Tm = 0.5*(T_solidus(Cm)+T_liquidus(Cm));
+  ctx.fillText("α Al + Liquid", xPix(Cm), yPix(Tm));
+  ctx.fillText("α Al + CuAl₂ (θ)", xPix(3.5), yPix(180));
+  ctx.fillText("Liquid", xPix(4.0), yPix(680));
+}
+
+function render(){
+  drawAxes();
+  fillRegions();
+  guides();
+  regionLabels();
+}
+render();
+
+// ===== Hover (disabled during quiz) =====
+let quizOn = false;
+canvas.addEventListener('mousemove', (e)=>{
+  if(quizOn){ tip.style.display="none"; return; }
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  if(x < xPix(0)-5 || x > xPix(MAX_CU)+5 || y < yPix(T_MAX)-5 || y > yPix(T_MIN)+5){
+    tip.style.display="none"; return;
+  }
+  const {C,T} = fromPix(x,y);
+  const ph = getPhase(C,T);
+  tip.style.display="block";
+  tip.style.left = `${e.clientX}px`;
+  tip.style.top  = `${e.clientY}px`;
+  tip.innerHTML = `<b>${ph.name}</b><br>${C.toFixed(2)} wt% Cu, ${T.toFixed(0)} °C`;
+});
+canvas.addEventListener('mouseleave', ()=>{ tip.style.display="none"; });
+
+// ===== Quiz mode: Region questions (no marker) =====
+const startBtn = document.getElementById('start');
+const nextBtn  = document.getElementById('next');
+const resetBtn = document.getElementById('reset');
+const qinfo    = document.getElementById('qinfo');
+const scoreEl  = document.getElementById('score');
+const flash    = document.getElementById('flash');
+
+let score = 0, total = 0;
+const N_QUESTIONS = 9; // any multiple of 3 works nicely
+let targetPhase = null;
+let locked = false;
+
+// Questions pool (only the three requested)
+const ASKABLE = [
+  "α Al (solid solution)",
+  "α Al + Liquid",
+  "α Al + CuAl₂ (θ)"
+];
+
+function askQuestion(){
+  locked = false;
+  // pick one of the three at random
+  targetPhase = ASKABLE[Math.floor(Math.random()*ASKABLE.length)];
+  qinfo.textContent = `Question ${total+1} of ${N_QUESTIONS}: Where is the region of ${targetPhase}? Click the diagram.`;
+  nextBtn.disabled = true;
+}
+
+function startQuiz(){
+  quizOn = true;
+  showLabels = false; // hide labels during quiz
+  score = 0; total = 0;
+  scoreEl.textContent = `Score: 0 / 0`;
+  startBtn.disabled = true;
+  nextBtn.disabled = true;
+  tip.style.display = "none";
+  render();
+  askQuestion();
+}
+startBtn.addEventListener('click', startQuiz);
+
+function endQuiz(){
+  quizOn = false;
+  qinfo.textContent = `Quiz finished — Final score: ${score} / ${total}`;
+  nextBtn.disabled = true;
+  startBtn.disabled = false;
+}
+nextBtn.addEventListener('click', ()=>{
+  if(total >= N_QUESTIONS){ endQuiz(); return; }
+  askQuestion();
+});
+
+// Click to answer (determine region at click)
+canvas.addEventListener('click', (e)=>{
+  if(!quizOn || locked) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+
+  // ignore clicks outside plot area
+  if(x < xPix(0)-5 || x > xPix(MAX_CU)+5 || y < yPix(T_MAX)-5 || y > yPix(T_MIN)+5) return;
+
+  const {C,T} = fromPix(x,y);
+  const clicked = getPhase(C,T).name;
+
+  // flash feedback at click
+  flash.style.left = `${rect.left + window.scrollX + x}px`;
+  flash.style.top  = `${rect.top  + window.scrollY + y}px`;
+  flash.style.display = "block";
+  const ok = (clicked.toLowerCase() === targetPhase.toLowerCase());
+  flash.style.background = ok ? "#10b981" : "#ef4444";
+  setTimeout(()=>{ flash.style.display="none"; }, 550);
+
+  total += 1;
+  if(ok) score += 1;
+  scoreEl.textContent = `Score: ${score} / ${total}`;
+  qinfo.textContent = ok ? "Correct! Click Next for the next question."
+                         : `Not quite—your click was in ${clicked}. Click Next to continue.`;
+  locked = true;
+  nextBtn.disabled = false;
+  if(total >= N_QUESTIONS) qinfo.textContent += "  (Final question — click Next to finish)";
+});
+
+// Reset: exit quiz & show labels again
+function doReset(){
+  quizOn = false;
+  showLabels = true;
+  startBtn.disabled = false;
+  nextBtn.disabled = true;
+  tip.style.display="none";
+  qinfo.textContent = "Quiz off";
+  score = 0; total = 0;
+  scoreEl.textContent = `Score: 0 / 0`;
+  render(); // redraw with labels
+}
+resetBtn.addEventListener('click', doReset);
+</script>
+</body>
+</html>
